@@ -1,0 +1,82 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on: [zookeeper]
+    ports: ["29092:29092"]
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: kafka-topics --bootstrap-server localhost:9092 --list || exit 1
+      interval: 5s
+      retries: 20
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.0
+    depends_on:
+      kafka: { condition: service_healthy }
+    ports: ["8081:8081"]
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:9092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    healthcheck:
+      test: curl -f http://localhost:8081/subjects || exit 1
+      interval: 5s
+      retries: 20
+
+  cassandra:
+    image: cassandra:4.1
+    ports: ["9042:9042"]
+    environment:
+      CASSANDRA_DC: dc1
+      CASSANDRA_ENDPOINT_SNITCH: SimpleSnitch
+      MAX_HEAP_SIZE: 256M
+      HEAP_NEWSIZE: 50M
+    mem_limit: 1g
+    healthcheck:
+      test: cqlsh -e "DESCRIBE KEYSPACES;" || exit 1
+      interval: 10s
+      retries: 30
+      start_period: 60s
+
+  migrations:
+    build: ./migrations
+    depends_on:
+      cassandra: { condition: service_healthy }
+    environment:
+      CASSANDRA_HOST: cassandra
+
+  consumer:
+    build: ./consumer
+    depends_on:
+      kafka: { condition: service_healthy }
+      schema-registry: { condition: service_healthy }
+      migrations: { condition: service_completed_successfully }
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CASSANDRA_HOSTS: cassandra
+      CASSANDRA_PORT: 9042
+    restart: on-failure
+
+  producer:
+    build: ./producer
+    depends_on:
+      kafka: { condition: service_healthy }
+      schema-registry: { condition: service_healthy }
+    ports: ["8000:8000"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
